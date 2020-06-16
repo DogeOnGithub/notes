@@ -4,6 +4,8 @@
 
 [参考链接：java动态代理实现与原理详细分析](https://www.cnblogs.com/gonjan-blog/p/6685611.html)
 
+[参考链接：JAVA动态代理](https://www.jianshu.com/p/9bcac608c714)
+
 ---
 
 ## 代理模式
