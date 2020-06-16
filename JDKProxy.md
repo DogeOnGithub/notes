@@ -297,8 +297,202 @@ public class PrincessProxy<T> implements InvocationHandler {
             throw new InternalError(e.toString(), e);
         }
     }
+
+    /**
+     * Generate a proxy class.  Must call the checkProxyAccess method
+     * to perform permission checks before calling this.
+     */
+    private static Class<?> getProxyClass0(ClassLoader loader,
+                                           Class<?>... interfaces) {
+        if (interfaces.length > 65535) {
+            throw new IllegalArgumentException("interface limit exceeded");
+        }
+
+        // If the proxy class defined by the given loader implementing
+        // the given interfaces exists, this will simply return the cached copy;
+        // otherwise, it will create the proxy class via the ProxyClassFactory
+        // 如果指定接口的代理类已经存在与缓存中，则不用新创建，直接从缓存中取即可
+        // 如果缓存中没有指定代理对象，则通过ProxyClassFactory来创建一个代理对象
+        return proxyClassCache.get(loader, interfaces);
+    }
 ```
 
+```java
+    public V get(K key, P parameter) {
+        Objects.requireNonNull(parameter);
+
+        expungeStaleEntries();
+
+        Object cacheKey = CacheKey.valueOf(key, refQueue);
+
+        // lazily install the 2nd level valuesMap for the particular cacheKey
+        ConcurrentMap<Object, Supplier<V>> valuesMap = map.get(cacheKey);
+        if (valuesMap == null) {
+            ConcurrentMap<Object, Supplier<V>> oldValuesMap
+                = map.putIfAbsent(cacheKey,
+                                  valuesMap = new ConcurrentHashMap<>());
+            if (oldValuesMap != null) {
+                valuesMap = oldValuesMap;
+            }
+        }
+
+        // create subKey and retrieve the possible Supplier<V> stored by that
+        // subKey from valuesMap
+        Object subKey = Objects.requireNonNull(subKeyFactory.apply(key, parameter));
+        Supplier<V> supplier = valuesMap.get(subKey);
+        Factory factory = null;
+
+        while (true) {
+            if (supplier != null) {
+                // supplier might be a Factory or a CacheValue<V> instance
+                V value = supplier.get();
+                if (value != null) {
+                    return value;
+                }
+            }
+            // else no supplier in cache
+            // or a supplier that returned null (could be a cleared CacheValue
+            // or a Factory that wasn't successful in installing the CacheValue)
+
+            // lazily construct a Factory
+            if (factory == null) {
+                factory = new Factory(key, parameter, subKey, valuesMap);
+            }
+
+            if (supplier == null) {
+                supplier = valuesMap.putIfAbsent(subKey, factory);
+                if (supplier == null) {
+                    // successfully installed Factory
+                    supplier = factory;
+                }
+                // else retry with winning supplier
+            } else {
+                if (valuesMap.replace(subKey, supplier, factory)) {
+                    // successfully replaced
+                    // cleared CacheEntry / unsuccessful Factory
+                    // with our Factory
+                    supplier = factory;
+                } else {
+                    // retry with current supplier
+                    supplier = valuesMap.get(subKey);
+                }
+            }
+        }
+    }
+```
+
+在Proxy类中有一个重要的内部类，代理类工厂，该类会在代理类缓存初始化时，被创建，代理类工厂是真正生成类的地方
+
+```java
+    /**
+     * A factory function that generates, defines and returns the proxy class given
+     * the ClassLoader and array of interfaces.
+     */
+    private static final class ProxyClassFactory
+        implements BiFunction<ClassLoader, Class<?>[], Class<?>>
+    {
+        // prefix for all proxy class names
+        // 所有代理类的前缀
+        private static final String proxyClassNamePrefix = "$Proxy";
+
+        // next number to use for generation of unique proxy class names
+        // 原子递增的long类型，生成的代理类后缀
+        private static final AtomicLong nextUniqueNumber = new AtomicLong();
+
+        @Override
+        public Class<?> apply(ClassLoader loader, Class<?>[] interfaces) {
+
+            Map<Class<?>, Boolean> interfaceSet = new IdentityHashMap<>(interfaces.length);
+            for (Class<?> intf : interfaces) {
+                /*
+                 * Verify that the class loader resolves the name of this
+                 * interface to the same Class object.
+                 */
+                Class<?> interfaceClass = null;
+                try {
+                    interfaceClass = Class.forName(intf.getName(), false, loader);
+                } catch (ClassNotFoundException e) {
+                }
+                if (interfaceClass != intf) {
+                    throw new IllegalArgumentException(
+                        intf + " is not visible from class loader");
+                }
+                /*
+                 * Verify that the Class object actually represents an
+                 * interface.
+                 */
+                if (!interfaceClass.isInterface()) {
+                    throw new IllegalArgumentException(
+                        interfaceClass.getName() + " is not an interface");
+                }
+                /*
+                 * Verify that this interface is not a duplicate.
+                 */
+                if (interfaceSet.put(interfaceClass, Boolean.TRUE) != null) {
+                    throw new IllegalArgumentException(
+                        "repeated interface: " + interfaceClass.getName());
+                }
+            }
+
+            String proxyPkg = null;     // package to define proxy class in
+            int accessFlags = Modifier.PUBLIC | Modifier.FINAL;
+
+            /*
+             * Record the package of a non-public proxy interface so that the
+             * proxy class will be defined in the same package.  Verify that
+             * all non-public proxy interfaces are in the same package.
+             */
+            for (Class<?> intf : interfaces) {
+                int flags = intf.getModifiers();
+                if (!Modifier.isPublic(flags)) {
+                    accessFlags = Modifier.FINAL;
+                    String name = intf.getName();
+                    int n = name.lastIndexOf('.');
+                    String pkg = ((n == -1) ? "" : name.substring(0, n + 1));
+                    if (proxyPkg == null) {
+                        proxyPkg = pkg;
+                    } else if (!pkg.equals(proxyPkg)) {
+                        throw new IllegalArgumentException(
+                            "non-public interfaces from different packages");
+                    }
+                }
+            }
+
+            if (proxyPkg == null) {
+                // if no non-public proxy interfaces, use com.sun.proxy package
+                proxyPkg = ReflectUtil.PROXY_PACKAGE + ".";
+            }
+
+            /*
+             * Choose a name for the proxy class to generate.
+             */
+            long num = nextUniqueNumber.getAndIncrement();
+            String proxyName = proxyPkg + proxyClassNamePrefix + num;
+
+            /*
+             * Generate the specified proxy class.
+             * 在这里生成代理类字节码文件
+             */
+            byte[] proxyClassFile = ProxyGenerator.generateProxyClass(
+                proxyName, interfaces, accessFlags);
+            try {
+                return defineClass0(loader, proxyName,
+                                    proxyClassFile, 0, proxyClassFile.length);
+            } catch (ClassFormatError e) {
+                /*
+                 * A ClassFormatError here means that (barring bugs in the
+                 * proxy class generation code) there was some other
+                 * invalid aspect of the arguments supplied to the proxy
+                 * class creation (such as virtual machine limitations
+                 * exceeded).
+                 */
+                throw new IllegalArgumentException(e.toString());
+            }
+        }
+    }
+```
+
+可以使用`System.getProperties().setProperty("sun.misc.ProxyGenerator.saveGeneratedFiles", "true");`保存生成的代理类
 JVM生成的代理类大致如下：
 
 ```java
