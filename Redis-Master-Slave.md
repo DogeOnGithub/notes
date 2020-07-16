@@ -126,7 +126,7 @@ slave 不会过期 key，只会等待 master 过期 key
 client-output-buffer-limit slave 256MB 64MB 60
 ```
 
-+ slave node 接收到 rdb 之后，清空自己的旧数据，然后重新加载 rdb 到自己的内存中，同时**基于旧的数据版本**对外提供服务
++ slave node 接收到 rdb 之后，清空自己的旧数据，然后重新加载 rdb 到自己的内存中，同时**基于旧的数据版本**对外提供服务（加载RDB过程中会停止服务）
 + 如果 slave node 开启了 AOF，那么会立即执行 BGREWRITEAOF，重写 AOF
 
 ## 增量同步
