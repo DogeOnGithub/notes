@@ -83,4 +83,4 @@ Kafka 会均匀地将一个 partition 的所有 replica 分布在不同的机器
 
 **消费**的时候，只会从 leader 去读，但是只有当一个消息已经被所有 follower 都同步成功返回 ack 的时候，这个消息才会被消费者读到
 
-[关于 Kafka 架构](./Kafka.md)
+[关于 Kafka 架构](./MQ-Kafka.md)
