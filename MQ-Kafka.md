@@ -188,3 +188,40 @@ Partition在服务器上的表现形式就是一个一个的文件夹，每个pa
 如上图，这个partition有三组segment文件，每个log文件的大小是一样的，但是存储的message数量是不一定相等的（每条的message大小不一致）
 
 文件的命名是以该segment最小offset来命名的，如000.index存储offset为0~368795的消息，kafka就是利用分段+索引的方式来解决查找效率的问题
+
+## Kafka ISR
+
+### ISR And AR
+
++ 分区中的所有的副本统称为AR（Assigned Replicas）
++ 所有与leader副本保持一定程度的同步的副本（包括leader在内）组成ISR（In-Sync Replicas）
++ ISR集合是AR集合的一个子集
++ 消息会先发送到leader副本，然后follower副本才能从leader中拉取消息进行同步，同步期间，follower副本相对于leader副本而言，会有一定程度的滞后
++ 这里所指的一定程度的同步是指同步可以忍受的滞后范围，该范围可以通过参数进行配置
++ 与leader副本同步滞后大于阀值的副本（不包括leader副本）将组成OSR（Out-of-Sync Repicas），即可以看做：AR = ISR + OSR
++ 正常情况下，所有follower副本都应该与leader副本保持一定程度的同步，即AR = ISR，OSR集合为空
+
+### ISR 伸缩性
+
++ leader副本负责维护和跟踪ISR集合中所有follower副本的滞后状态，当follower副本落后太多或失效时，leader副本会把它从ISR集合中剔除
++ 如果OSR集合中的所有follower副本追上了leader副本，那么leader副本会把它从OSR集合转移到ISR集合
++ 默认情况下，当leader副本发生故障时，只有在ISR集合中的follower副本才有资格被选举为新的leader，而OSR中的副本没有任何机会成为leader
+
+### ISR 复制机制
+
++ ISR（In-Sync Replicas）是分区Leader在Zk（/brokers/topics/[topic]/partitions/[partition]/state）目录中动态维护基本保持同步的Replica列表
++ 该列表中保存的是与Leader副本保持消息同步的所有副本对应的节点ID
++ 如果一个Follower宕机或者其落后情况超过任意参数replica.lag.time.max.ms（延迟时间）、replica.lag.max.messages（延迟条数，Kafka 0.10.x版本后移除）设置阈值，则该Follower副本节点将从ISR列表中剔除并存入OSR(Outof-Sync Replicas)列表
++ LEO（last end offset）日志末端偏移量，记录了该副本对象底层日志文件中下一条消息的位移值
++ HW（highwatermark），高水印值，任何一个副本对象的HW值一定不大于其LEO值，而小于或等于HW值的所有消息被认为是“已提交的”或“已备份的”，consumer只能消费已提交的消息，HW之后的数据对consumer不可见
+
+![kafka-HW-LEO](./images/kafka-HW-LEO.jpg)
+
+同步过程如下：
+
+1. Follower向Leader发送fetch请求（此过程类似于普通消费者，区别在于内部broker的读取请求，没有HW的限制）
+2. Leader接收到Follwer fetch操作后根据fetch请求中Postion从自身log中获取相应数据，并根据fetch请求中Postion更新leader中存储的follower LEO（即Leader认为该follower已经对偏移值为LEO的消息完成了同步或备份）
+3. Leader读取存在于ISR列表中副本的LEO（包括leader自己的LEO）值，并选择最小的LEO值作为HW值（Leader认为ISR已经对LEO为止的消息完成了同步或备份，消费者可以消费HW以前的消息）
+4. Follower接收到leader的数据响应后，开始向底层log写数据，每当新写入一条消息，其LEO值就会加1，写完数据后，通过比较当前LEO值与FETCH响应中leader的HW值，取两者的小者作为新的HW值
+
+由此可见，Kafka复制机制既不是完全的同步复制，也不是单纯的异步复制，Kafka通过 ISR复制机制在保障数据一致性情况下又可提供高吞吐量
