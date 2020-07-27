@@ -138,4 +138,53 @@ Producer使用push模式将消息发布到broker，Consumer使用pull模式从br
 接下来讨论的是消息从broker到Consumer的delivery guarantee语义。（仅针对Kafka consumer high level API）。Consumer在从broker读取消息后，可以选择commit，该操作会在Zookeeper中保存该Consumer在该Partition中读取的消息的offset。该Consumer下一次再读该Partition时会从下一条开始读取。如未commit，下一次读取的开始位置会跟上一次commit之后的开始位置相同。当然可以将Consumer设置为autocommit，即Consumer一旦读到数据立即自动commit。如果只讨论这一读取消息的过程，那Kafka是确保了Exactly once。但实际使用中应用程序并非在Consumer读取完数据就结束了，而是要进行进一步处理，而数据处理与commit的顺序在很大程度上决定了消息从broker和consumer的delivery guarantee semantic。
 Kafka默认保证At least once，并且允许通过设置Producer异步提交来实现At most once。而Exactly once要求与外部存储系统协作，幸运的是Kafka提供的offset可以非常直接非常容易得使用这种方式。
 
-来自 <https://www.cnblogs.com/frankdeng/p/9310684.html> 
+来自 <https://www.cnblogs.com/frankdeng/p/9310684.html>
+
+## 搭建 kafka
+
+[使用Docker搭建Kafka](https://www.cnblogs.com/answerThe/p/11267129.html)
+
+## Kafka 工作流程
+
+### 发送消息
+
+![kafka-send-msg](./images/kafka-send-msg.png)
+
++ ***Producer 在写入数据的时候永远往leader发送数据，不会直接将数据写入follower***
++ 消息写入leader后，follower会主动的去leader进行同步
++ Producer采用push模式将数据发布到broker，每条消息追加到分区中，顺序写入磁盘，所以**Kafka能保证同一分区内的数据是有序的**，但并不会保证消息的全局有序性
+
+![kafka发送消息分区](./images/kafka发送消息分区.png)
+
+### kafka 分区作用
+
++ 方便扩展，一个topic可以用多个partition，在数据量增大时可以通过扩展机器数量轻松应对
++ 提高并发，以partition为读写单位，可以多个消费者同时消费消息，提高消息的处理效率
+
+### 消息分区发送策略
+
++ partition在写入的时候可以指定需要写入的partition，如果有指定，则写入对应的partition
++ 如果没有指定partition，但是设置了数据的key，则会根据key的值hash出一个partition
++ 如果既没指定partition，又没有设置key，则会轮询选出一个partition
+
+### 保证消息传输安全（ACK应答机制，Producer在向Kafka队列写入消息时，可以设置参数来确定是否确认Kafka收到数据，该参数可设置的值为：0、1、all）
+
++ 0代表Producer往集群发送数据不需要等待集群的确认消息返回，不确保消息发送成功，安全性最低但是效率最高
++ 1代表Producer往集群发送数据时只需要leader应答就可以继续发送下一条，只确保消息发往leader成功
++ all代表Producer往集群发送数据时，需要所有的follower都完成从leader的数据同步才可以发送下一条，确保leader发送成功以及所有的follower都完成数据备份，安全性最高但是效率最低
+
+### 保存数据
+
++ Producer将数据写入kafka后，集群就需要对数据进行保存
++ kafka将数据保存在磁盘
++ Kafka初始会单独开辟一块磁盘空间，顺序写入数据（效率比随机写入高）
+
+### partition 结构
+
+Partition在服务器上的表现形式就是一个一个的文件夹，每个partition的文件夹下面会有多组segment文件，每组segment文件又包含.index文件、.log文件、.timeindex文件（早期版本中没有）三个文件， log文件就实际是存储message的地方，而index和timeindex文件为索引文件，用于检索消息
+
+![kafka-partition](./images/kafka-partition.png)
+
+如上图，这个partition有三组segment文件，每个log文件的大小是一样的，但是存储的message数量是不一定相等的（每条的message大小不一致）
+
+文件的命名是以该segment最小offset来命名的，如000.index存储offset为0~368795的消息，kafka就是利用分段+索引的方式来解决查找效率的问题
